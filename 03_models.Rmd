@@ -1,0 +1,396 @@
+---
+title: "Models for Analyses"
+author: "Nikolina Klatt"
+date: "`r format(Sys.time(), '%B %d, %Y | %H:%M:%S | %Z')`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    number_sections: no
+    theme: cosmo
+    toc: true
+    toc_float: true
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{=html}
+<style>
+  div.answer {background-color:#f3f0ff; border-radius: 5px; padding: 20px;}
+      </style>
+```
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      eval = TRUE,
+                      error = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+```{r}
+library(tidyverse) 
+library(readxl) 
+library(jtools)
+library(janitor)
+library(ggplot2)
+library(broom)
+library(gt)
+library(plotrix)
+library(ggeffects)
+library(sjPlot)
+library(gtsummary)
+library(mgcv)
+library(survival)
+library(fixest)
+library(lme4)
+library(plm)
+library(effects)
+library(ggeffects)
+library(webshot2)
+library(Hmisc)
+```
+
+## Data Preparation
+
+```{r}
+tweets_final <- read_excel("data/tweets_final.xlsx")
+    
+# select relevant variables 
+data <- tweets_final %>% 
+  dplyr::select(date, docnum, text, name, state, party, congress, pred_story_type) %>% 
+  filter(party != "I")
+    
+# create new relevant variables 
+data <- data %>%
+  mutate(overturn = as.factor(ifelse(date >= "2022-06-24", 1, 0)),
+         story_type = as.factor(pred_story_type),
+         story_type_binary = ifelse(pred_story_type == "Story of Decline", 1, 0),
+         party = as.factor(party),
+         party_binary = if_else(party == "R", 1, 0),
+         state_trigger_law = as.factor(as.integer(state %in% c(
+          "AL", "AZ", "AR", "ID", "KY", "LA", "MS", "MO", 
+          "ND", "OK", "SD", "TN", "TX", "UT", "WY", "WV", "WI"))),
+         date = as.Date(date),
+         date_numeric = as.numeric(date),  
+         date_for_plot = as.Date(date_numeric, origin = "1970-01-01"),
+         events = factor(case_when(
+           date < "2022-05-02" ~ "Before Leak",
+           date >= "2022-05-02" & date < "2022-06-24" ~ "Between Leak and Overturning",
+           date >= "2022-06-24" & date < "2022-09-13" ~ "Between Overturning and Bill",
+           date >= "2022-09-13" & date < "2022-11-08" ~ "Between Bill and Midterm Elections",
+           date >= "2022-11-08" ~ "After the Midterm Elections"), 
+           levels = c("Before Leak", 
+                      "Between Leak and Overturning", 
+                      "Between Overturning and Bill",
+                      "Between Bill and Midterm Elections",
+                      "After the Midterm Elections"
+                      ))
+         )
+```
+
+### Figure 1: Frequency Plot
+
+```{r}
+fig_1 <- ggplot(data %>% filter(!party=="I"), aes(x = date, fill = party)) +
+  geom_bar(stat = "count", position = "dodge") +
+  geom_vline(xintercept = as.Date("2022-05-02"), color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-06-24"), color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-09-13"), color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-11-08"), color = "grey", linetype = "dashed") +
+  annotate("text", x = as.Date("2022-05-02"), y = 160, label = "Leaked Draft", color = "grey", angle = 90, vjust = -0.5) + 
+  annotate("text", x = as.Date("2022-06-24"), y = 163, label = "Overturning", color = "grey", angle = 90, vjust = -0.5) +
+  annotate("text", x = as.Date("2022-09-13"), y = 145, label = "15-Week Ban Proposal", color = "grey", angle = 90, vjust = -0.5) +
+  annotate("text", x = as.Date("2022-11-08"), y = 155, label = "Midterm Elections", color = "grey", angle = 90, vjust = -0.5) +
+  labs(title = "Frequency Distribution of Abortion-related Tweets by Party Affiliation",
+       x = "",
+       y = "Number of Tweets",
+       subtitle = "",
+       fill = "Party") +
+  scale_fill_manual(values = c("#0072B2", "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("output/fig_1.png", plot = fig_1, width = 10, height = 6, dpi = 300)
+
+fig_1
+```
+
+## H0: No effect of the overturning of Roe v. Wade on the story types used in narratives by US representatives on Twitter
+
+### Table 2: Models 1 and 2
+
+```{r}
+# Create Model 1
+model_1 <- glm(story_type_binary ~ overturn,
+               family = binomial(),
+               data = data)
+
+exp(coef(model_1))
+
+# Create regression table for model 1
+table_model_1 <- model_1 %>%
+  tbl_regression(exponentiate = FALSE) %>%
+  bold_labels() %>%
+  bold_p(t = .1) %>%
+  add_glance_table(include = nobs) 
+    
+# Create Model 2
+model_2 <- glmer(story_type_binary ~ events +
+                   (1 | name),
+                 data = data,
+                 family = binomial())
+
+# Create regression table for model 2
+table_model_2 <- model_2 %>%
+  tbl_regression(exponentiate = FALSE) %>%
+  bold_labels() %>%
+  bold_p(t = .1) %>%
+  add_glance_table(include = nobs)
+    
+# Merge the tables for models 1 and 2
+table_merged_1_2 <- tbl_merge(
+  list(table_model_1, table_model_2),
+  tab_spanner = c("**Logistic Regression Model (1)**", 
+                  "**Generalized Linear Mixed Model (2)**")
+    )
+    
+# Convert to gt for additional customization
+table_1_2_gt <- table_merged_1_2 %>%
+      as_gt() %>%
+      tab_spanner(
+        label = "",
+        columns = starts_with("estimate")
+      ) 
+
+gtsave(table_1_2_gt, filename = "output/table_1.png")
+
+table_1_2_gt
+```
+
+### Figure 2: Marginal Effects Model 2
+
+```{r}
+# Effects of Model 2
+model_2_effects <- effect("events", model_2)
+    
+# Convert effects object to a data frame
+effects_df <- as.data.frame(model_2_effects)
+    
+# Plot marginal effects 
+fig_2 <- ggplot(effects_df, aes(x = events, y = fit)) +
+  geom_point() +  # Add points to see data points
+  geom_line(group = 1) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, alpha = 0.5, color = "red") +  # This adds the error bars
+  labs(title = "Marginal Effects of Story of Decline",
+       subtitle = "Generalized Linear Mixed Model (2)",
+       x = "",
+       y = "Estimated Effect") +
+  theme_minimal()
+    
+ggsave("output/fig_2.png", fig_2, width = 11, height = 5, dpi = 300)
+
+fig_2
+```
+
+### Figure 3: Generalized Additive Model 3 - Time Aspect
+
+```{r}
+# GAM model with date_numeric
+model_3 <- gam(story_type_binary ~ s(date_numeric) +
+                 events +
+                 party +
+                 state_trigger_law,
+               family = binomial(),
+               data = data)
+    
+# Create plot data from the GAM model
+model_3_plot_data <- data.frame(
+  date_for_plot = data$date_for_plot,
+  party = data$party,
+  fitted_values = fitted(model_3),
+  se_fit = sqrt(summary(model_3)$s.table[, "edf"]) * 2)
+    
+# Plot 
+fig_3 <- ggplot(model_3_plot_data, aes(x = date_for_plot, y = fitted_values)) +
+  geom_line() +
+  geom_vline(xintercept = as.Date("2022-05-02"), color = "red", linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-06-24"), color = "red", linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-09-13"), color = "red", linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2022-11-08"), color = "red", linetype = "dashed") +
+  annotate("text", x = as.Date("2022-05-02"), y = 0.55, label = "Leaked Draft", color = "red", angle = 90, vjust = -0.5) +
+  annotate("text", x = as.Date("2022-06-24"), y = 0.55, label = "Overturning", color = "red", angle = 90, vjust = -0.5) +
+  annotate("text", x = as.Date("2022-09-13"), y = 0.45, label = "15-Week Ban Proposal", color = "red", angle = 90, vjust = -0.5) +
+  annotate("text", x = as.Date("2022-11-08"), y = 0.57, label = "Midterm Elections", color = "red", angle = 90, vjust = -0.5) +
+  labs(title = "Change in Probability of Story of Decline",
+       subtitle = "Generalized Additive Model (3)",
+       x = "", 
+       y = "Fitted Values") +
+  theme_minimal()
+    
+ggsave("output/fig_3.png", fig_3, width = 9, height = 5, dpi = 300)
+
+fig_3
+```
+
+## H1: Democrats and Republicans exhibited different adjustments in their story types after the overturning.
+
+### Table 2: Models 4 and 5
+
+```{r}
+# Create Model 4
+model_4 <- glmer(story_type_binary ~ party*events +
+                       (1 | name),
+                     data = data,
+                     family = binomial())
+
+# Create regression table for model 4
+table_model_4 <- model_4 %>%
+  tbl_regression(exponentiate = FALSE) %>%
+  bold_labels() %>%
+  bold_p(t = .1) %>%
+  add_glance_table(include = nobs)
+
+# Create dataset for Republicans for Model 5
+rep <- data %>%
+  filter(party == "R")
+
+# Create Model 5
+model_5 <- glmer(story_type_binary ~ events +
+                   (1 | name),
+                 data = rep,
+                 family = binomial())
+    
+# Create regression table for model 5
+table_model_5 <- model_5 %>%
+  tbl_regression(exponentiate = FALSE) %>%
+  bold_labels() %>%
+  bold_p(t = .1) %>%
+  add_glance_table(include = nobs)
+    
+# Merge the tables
+table_merged_4_5 <- tbl_merge(
+  list(table_model_4, table_model_5),
+  tab_spanner = c("**GLMM (4)**", 
+                  "**GLMM Republicans (5)**")
+    )
+    
+# Convert to gt for additional customization
+table_4_5_gt <- table_merged_4_5 %>%
+  as_gt() %>%
+  tab_spanner(label = "",
+              columns = starts_with("estimate")
+      ) 
+    
+gtsave(table_4_5_gt, filename = "output/table_2.png")
+
+table_4_5_gt
+```
+
+### Figure 4: Predicted Probability Model 4
+
+```{r}
+# Calculating predicted probabilities
+model_4_pp <- ggpredict(model_4, terms = c("events", "party"))
+    
+fig_4 <- ggplot(model_4_pp, aes(x = x, 
+                                y = predicted, 
+                                color = group, 
+                                group = group)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Predicted Probability of 'Story of Decline' by Party",
+       subtitle = "Generalized Linear Mixed Model (4)",
+       x = "",
+       y = "Predicted Probability",
+       color = "Party") +
+  scale_color_manual(values = c("#56B4E9", "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") 
+    
+ggsave("output/fig_4.png", fig_4, width = 11, height = 5, dpi = 300)
+
+fig_4
+```
+
+## H2: Geographic variability in narrative shifts based on state-level abortion policies.
+
+### Figure 5: Density of Proportion of Story of Decline
+
+```{r}
+state_data <- data %>%
+      group_by(state, events, state_trigger_law) %>%
+      summarise(proportion_decline = mean(story_type_binary, na.rm = TRUE)) %>% 
+      ungroup()
+    
+custom_colors <- c("0" = "purple", "1" = "yellow")  
+    
+fig_5 <- ggplot(state_data, aes(x = proportion_decline, 
+                                fill = as.factor(state_trigger_law))) +
+  geom_density(alpha = 0.3) +
+  facet_wrap(~ events) +  
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  labs(title = "Density of Proportion of Story of Decline by Trigger Law Status",
+       subtitle = "Facetted by Events",
+       x = "Proportion of Story of Decline",
+       y = "Density",
+       fill = "Trigger Law Status"  
+      ) +
+  scale_fill_manual(values = custom_colors)  
+    
+ggsave("output/fig_5.png", fig_5, width = 10, height = 6, dpi = 300)
+
+fig_5
+```
+
+### Table 3: Models 6 and 7
+
+```{r}
+# Create Models 6 and 7
+model_6 <- glmer(story_type_binary ~ state_trigger_law +
+                   events +
+                   party +
+                   (1 | name),
+                 data = data,
+                 family = binomial())
+
+model_7 <- glmer(story_type_binary ~ state_trigger_law*events +
+                   state_trigger_law*party +
+                   (1 | name),
+                 data = data,
+                 family = binomial())
+
+# Create regression table for each model
+table_model_6 <- tbl_regression(model_6, exponentiate = F) %>%
+  bold_labels() %>% 
+  bold_p(t = .1) %>%
+  add_glance_table(include = nobs)
+    
+table_model_7 <- tbl_regression(model_7, exponentiate = F) %>%
+  bold_labels() %>% 
+  bold_p(t = .1) %>%
+  add_glance_table(include = nobs)
+
+# Merge the tables
+table_merged_6_7 <- tbl_merge(
+  list(table_model_6, table_model_7),
+  tab_spanner = c("**GLMM (6)**", 
+                  "**GLMM with Interactions (7)**")
+    )
+    
+# Convert to gt for additional customization
+table_6_7 <- table_merged_6_7 %>%
+  as_gt() %>%
+  tab_spanner(
+    label = "",
+    columns = starts_with("estimate")
+      ) 
+
+gtsave(table_6_7, filename = "output/table_3.png")
+
+table_6_7
+```

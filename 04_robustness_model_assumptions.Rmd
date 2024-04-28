@@ -1,0 +1,384 @@
+---
+title: "Robustness Checks and Model Assumptions"
+author: "Nikolina Klatt"
+date: "`r format(Sys.time(), '%B %d, %Y | %H:%M:%S | %Z')`"
+output:
+  html_document:
+  code_folding: hide
+df_print: paged
+highlight: tango
+number_sections: no
+theme: cosmo
+toc: true
+toc_float: true
+editor_options: 
+  markdown: 
+  wrap: sentence
+---
+
+```{=html}
+<style>
+  div.answer {background-color:#f3f0ff; border-radius: 5px; padding: 20px;}
+      </style>
+```
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      eval = TRUE,
+                      error = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+#### Load Libraries
+
+```{r}
+library(DHARMa)
+library(lme4)
+library(boot)
+library(knitr)
+library(kableExtra)
+```
+
+### Model Assumptions
+
+#### 1. Overdispersion
+
+```{r}
+# Calculate overdispersion
+overdispersion_data <- data.frame(
+  Model = c("Model 4", "Model 7"),
+  Residual_Deviance = c(sum(resid(model_4, type = "pearson")^2),
+                        sum(resid(model_7, type = "pearson")^2)),
+  Degrees_of_Freedom = c(df.residual(model_4),
+                         df.residual(model_7)),
+  Overdispersion = c(sum(resid(model_4, type = "pearson")^2) / df.residual(model_4),
+                     sum(resid(model_7, type = "pearson")^2) / df.residual(model_7))
+)
+
+overdispersion_table <- overdispersion_data %>%
+  gt() %>%
+  tab_header(
+    title = "Overdispersion Check",
+    subtitle = "Results for Models 4 and 7"
+  ) %>%
+  cols_label(
+    Model = "Model",
+    Residual_Deviance = "Residual Deviance",
+    Degrees_of_Freedom = "Degrees of Freedom",
+    Overdispersion = "Overdispersion"
+  ) %>%
+  fmt_number(
+    columns = c(Residual_Deviance, Overdispersion),
+    decimals = 3  
+  ) %>%
+  fmt_number(
+    columns = c(Degrees_of_Freedom),
+    decimals = 0
+  ) %>%
+  tab_options(
+    heading.title.font.size = 16,
+    table.font.size = 12
+  )
+
+gtsave(overdispersion_table, filename = "output/table_overdispersion.png")
+```
+
+#### 2. Check Random Effects Structure
+
+```{r}
+# Model 4: Comparing a model without random effects
+model_4_no_re <- glm(story_type_binary ~ party*events, 
+                     family = binomial(), 
+                     data = data)
+
+anova_results_4 <- anova(model_4_no_re, model_4, test="Chisq")
+
+anova_results_4$Term <- c("", "party", "events", "party:events")
+anova_results_4 <- anova_results_4[c("Term", "Df", "Deviance", "Resid. Df", "Resid. Dev", "Pr(>Chi)")]
+
+anova_results_4_table <- anova_results_4 %>%
+  gt() %>%
+  tab_header(
+    title = "ANOVA Results Comparing Models with and without Random Effects for Model 4"
+  ) %>%
+  cols_label(
+    Term = "Term",
+    Df = "Degrees of Freedom",
+    Deviance = "Deviance",
+    `Resid. Df` = "Residual Df",
+    `Resid. Dev` = "Residual Deviance",
+    `Pr(>Chi)` = "p-value (Pr > Chi)"
+  ) %>%
+  fmt_number(
+    columns = c(Deviance, `Resid. Dev`),
+    decimals = 3
+  ) %>%
+  text_transform(
+    locations = cells_body(columns = c(`Pr(>Chi)`)),
+    fn = function(x) {
+      numeric_x = as.numeric(x)  
+      ifelse(is.na(numeric_x), "-",  
+             ifelse(numeric_x < 0.001, formatC(numeric_x, format = "e", digits = 2),
+                    ifelse(numeric_x < 0.1, sprintf("%.3f", numeric_x), sprintf("%.1f", numeric_x))))
+    }
+  ) %>%
+  fmt_missing(
+    columns = everything(),
+    missing_text = "-"
+  ) %>%
+  tab_options(
+    heading.title.font.size = 16,
+    heading.subtitle.font.size = 12,
+    table.font.size = 12
+  ) 
+
+gtsave(anova_results_4_table, "output/anova_results_4_table.png")
+
+anova_results_4_table
+```
+
+```{r}
+# Model 7: Comparing a model without random effects
+model_7_no_re <- glm(story_type_binary ~ state_trigger_law*events +
+                            state_trigger_law*party, family = binomial(), data = data)
+
+anova_results_7 <- anova(model_7_no_re, model_7, test="Chisq")
+
+anova_results_7$Term <- c("", 
+           "state_trigger_law", 
+           "events", 
+           "party", 
+           "state_trigger_law:events", 
+           "state_trigger_law:party")
+
+anova_results_7 <- anova_results_7[c("Term", "Df", "Deviance", "Resid. Df", "Resid. Dev", "Pr(>Chi)")]
+
+anova_results_7_table <- anova_results_7 %>%
+  gt() %>%
+  tab_header(
+    title = "ANOVA Results Comparing Models with and without Random Effects for Model 7"
+  ) %>%
+  cols_label(
+    Term = "Term",
+    Df = "Degrees of Freedom",
+    Deviance = "Deviance",
+    `Resid. Df` = "Residual Df",
+    `Resid. Dev` = "Residual Deviance",
+    `Pr(>Chi)` = "p-value (Pr > Chi)"
+  ) %>%
+  fmt_number(
+    columns = c(Deviance, `Resid. Dev`, `Pr(>Chi)`),
+    decimals = 3
+  ) %>%
+  text_transform(
+    locations = cells_body(columns = c(`Pr(>Chi)`)),
+    fn = function(x) {
+      numeric_x = as.numeric(x)  
+      ifelse(is.na(numeric_x), "-",  
+             ifelse(numeric_x < 0.001, formatC(numeric_x, format = "e", digits = 2),
+                    ifelse(numeric_x < 0.1, sprintf("%.3f", numeric_x), sprintf("%.1f", numeric_x))))
+    }
+  ) %>%
+  fmt_missing(
+    columns = everything(),
+    missing_text = "NA"
+  ) %>%
+  tab_options(
+    heading.title.font.size = 16,
+    heading.subtitle.font.size = 12,
+    table.font.size = 12
+  ) 
+
+gtsave(anova_results_7_table, "output/anova_results_7_table.png")
+
+anova_results_7_table
+```
+
+#### 3. Visual Inspection of Residuals
+
+```{r}
+# Model 4
+simulationOutput_4 <- simulateResiduals(fittedModel = model_4)
+plot(simulationOutput_4)
+```
+
+```{r}
+# Model 7
+simulationOutput_7 <- simulateResiduals(fittedModel = model_7)
+plot(simulationOutput_7)
+```
+
+### Robustness Checks
+
+#### Model 2
+
+```{r}
+# Define the bootstrap function properly
+boot_model <- function(data, indices) {
+  # Subsetting the data correctly
+  d <- data[indices, ]  # This selects the rows from data based on indices
+
+  # Fit the model on the bootstrapped sample
+  fit <- glmer(story_type_binary ~ events + (1 | name), 
+               data = d, 
+               family = binomial(),
+               control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5)))
+
+  # Return the coefficients
+  return(coef(summary(fit))[, "Estimate"])  # Make sure to return a vector, not a list
+}
+
+# Perform the bootstrap
+results <- boot(data, boot_model, R = 1000)  # R is the number of bootstrap replications
+
+# Check results
+print(results)
+```
+
+#### Model 4
+
+```{r}
+# Define the bootstrap function properly
+boot_model_4 <- function(data, indices) {
+  # Subsetting the data correctly
+  d <- data[indices, ]  # This selects the rows from data based on indices
+
+  # Fit the model on the bootstrapped sample
+  fit <- glmer(story_type_binary ~ party*events +
+                       (1 | name), 
+               data = d, 
+               family = binomial(),
+               control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5)))
+
+  # Return the coefficients
+  return(coef(summary(fit))[, "Estimate"])  # Make sure to return a vector, not a list
+}
+
+# Perform the bootstrap
+results_4 <- boot(data, boot_model_4, R = 1000)  # R is the number of bootstrap replications
+
+# Check results
+print(results_4)
+```
+
+```{r}
+# data frame for the bootstrap results
+bootstrap_results <- tibble(
+  Term = c("Intercept", 
+           "Party: Republican", 
+           "Events: Between Leak and Overturning", 
+           "Events: Between Overturning and Bill", 
+           "Events: Between Bill and Elections", 
+           "Party * Events: R * Between Leak and Overturning", 
+           "Party * Events: R * Between Overturning and Bill", 
+           "Party * Events: R * Between Bill and Elections", 
+           "Party * Events: R * After the Midterm Elections",
+           "Events: After the Midterm Elections"),
+  Original = c(-0.2121278, -0.4640305, 0.3118263, 0.1391909, 0.5914116, 0.1168544, 0.7376266, 0.7234358, -0.1404384, 0.2499038),
+  Bias = c(-0.009686919, -0.05997556, 0.01584416, -0.00009012501, -0.001518772, 0.01060334, 0.07077707, 0.07780977, 0.009708914, -0.04222745),
+  `Standard Error` = c(0.1020332, 0.1626014, 0.1236063, 0.1090190, 0.1260177, 0.2055031, 0.2279105, 0.2086866, 0.2951092, 0.5861987)
+)
+# gt table for displaying bootstrap results
+results_table <- bootstrap_results %>%
+  gt() %>%
+  tab_header(
+    title = "Bootstrap Analysis Results for Model 4",
+    subtitle = "Bootstrap estimates including bias and standard errors."
+  ) %>%
+  cols_label(
+    Term = "Model Term",
+    Original = "Original Estimate",
+    Bias = "Bias",
+    `Standard Error` = "Standard Error"
+  ) %>%
+  fmt_number(
+    columns = vars(Original, Bias, `Standard Error`),
+    decimals = 3
+  ) %>%
+  tab_options(
+    heading.title.font.size = 16,
+    heading.subtitle.font.size = 12,
+    table.font.size = 12
+  )
+
+gtsave(results_table, filename = "output/Bootstrap_Results_Model_4.png")
+
+results_table
+```
+
+#### Model 7
+
+```{r}
+# Define the bootstrap function properly
+boot_model_7 <- function(data, indices) {
+  # Subsetting the data correctly
+  d <- data[indices, ]  # This selects the rows from data based on indices
+
+  # Fit the model on the bootstrapped sample
+  fit <- glmer(story_type_binary ~ state_trigger_law*events +
+                            state_trigger_law*party +
+                       (1 | name), 
+               data = d, 
+               family = binomial(),
+               control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e5)))
+
+  # Return the coefficients
+  return(coef(summary(fit))[, "Estimate"])  # Make sure to return a vector, not a list
+}
+
+# Perform the bootstrap
+results_7 <- boot(data, boot_model_7, R = 1000)  # R is the number of bootstrap replications
+
+# Check results
+print(results_7)
+```
+
+```{r}
+# Create a data frame for the bootstrap results
+bootstrap_results_7 <- tibble(
+  Term = c("Intercept", 
+           "State Trigger Law", 
+           "Events: Between Leak and Overturning", 
+           "Events: Between Overturning and Bill", 
+           "Events: Between Bill and Elections", 
+           "State Trigger Law * Events: 1 * Between Leak and Overturning", 
+           "State Trigger Law * Events: 1 * Between Overturning and Bill", 
+           "State Trigger Law * Events: 1 * Between Bill and Elections", 
+           "State Trigger Law * Events: 1 * After the Midterm Elections",
+           "Party: Republican",
+           "State Trigger Law * Party: 1 * Republican",
+           "Events: After the Midterm Elections"),
+  Original = c(-0.30060216, -0.30825848, 0.43592967, 0.22182538, 0.65279408, 0.20043795, 0.03278532, 0.52229943, 0.70203533, -0.02854868, 0.18165022, -0.16047702),
+  Bias = c(-0.012994192, -0.009353453, 0.010904455, 0.001115051, -0.003927058, -0.010772111, -0.012529374, 0.020417454, 0.041713188, -0.022576117, -0.007008811, -0.005141397),
+  `Standard Error` = c(0.09560048, 0.22902316, 0.11366921, 0.10543786, 0.11792094, 0.20228605, 0.10828973, 0.25867939, 0.22967124, 0.30167752, 0.55217278, 0.20263632)
+)
+
+# Create a gt table for displaying bootstrap results for Model 7
+results_table_7 <- bootstrap_results_7 %>%
+  gt() %>%
+  tab_header(
+    title = "Bootstrap Analysis Results for Model 7",
+    subtitle = "Bootstrap estimates including bias and standard errors."
+  ) %>%
+  cols_label(
+    Term = "Model Term",
+    Original = "Original Estimate",
+    Bias = "Bias",
+    `Standard Error` = "Standard Error"
+  ) %>%
+  fmt_number(
+    columns = vars(Original, Bias, `Standard Error`),
+    decimals = 3
+  ) %>%
+  tab_options(
+    heading.title.font.size = 16,
+    heading.subtitle.font.size = 12,
+    table.font.size = 12
+  )
+
+# Save the table as an image
+gtsave(results_table_7, filename = "output/Bootstrap_Results_Model_7.png")
+
+results_table_7
+```

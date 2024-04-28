@@ -1,0 +1,267 @@
+---
+title: "Supervised Text Classification - all models"
+author: "Nikolina Klatt"
+date: "`r format(Sys.time(), '%B %d, %Y | %H:%M:%S | %Z')`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    number_sections: no
+    theme: cosmo
+    toc: true
+    toc_float: true
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{=html}
+<style>
+  div.answer {background-color:#f3f0ff; border-radius: 5px; padding: 20px;}
+      </style>
+```
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      eval = TRUE,
+                      error = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+#### Load Libraries
+
+```{r}
+library(tidyverse)      
+library(readxl)        
+library(tidymodels)     
+library(textrecipes)   
+library(glmnet)        
+library(yardstick)     
+library(janitor)        
+library(gt)
+library(dplyr)
+```
+
+#### Load Data
+
+```{r}
+# Load data set with manually annotated tweets
+tweets <- read_excel("data/tweets.xlsx")
+```
+
+### Step 1: Preparing the Data
+
+```{r}
+# Filter out NA values from auto_anno
+tweets_filtered <- tweets %>% 
+  filter(!is.na(auto_anno))
+
+# Create a binary factor for the outcome variable
+tweets_filtered <- tweets_filtered %>%
+  mutate(auto_anno = factor(auto_anno, 
+                            levels = c("Story of Decline", 
+                                       "Story of Rising")))
+
+# Split the data into training and testing sets
+set.seed(123)
+tweets_split <- initial_split(tweets_filtered, prop = 0.7, strata = auto_anno)
+tweets_train <- training(tweets_split)
+tweets_test <- testing(tweets_split)
+```
+
+### Step 2: Recipe Preparation
+
+```{r}
+tweet_recipe <- recipe(auto_anno ~ text, 
+                       data = tweets_train) %>%
+  step_tokenize(text) %>%
+  step_stopwords(text,  language = "en") %>%
+  step_tokenfilter(text, max_tokens = 1000) %>%
+  step_tfidf(text)
+```
+
+### Step 3: Model Specification
+
+```{r}
+# boost_tree() model
+# with “C5.0” engine
+bt_cls_spec <- 
+    boost_tree(trees = 15) %>% 
+    set_mode("classification") %>% 
+    set_engine("C5.0")
+
+# decision_tree() model
+# with “rpart” engine
+dt_cls_spec <- 
+    decision_tree(tree_depth = 30) %>% 
+    set_mode("classification") %>% 
+    set_engine("rpart")
+
+# logistic_reg() model
+# with glm engine
+logreg_cls_spec_glm <- 
+    logistic_reg() %>% 
+    set_engine("glm")
+
+# with glmnet engine
+logreg_cls_spec_glmnet <- 
+    logistic_reg(penalty = 0.1) %>% 
+    set_engine("glmnet")
+
+# with the "LiblineaR" engine
+logreg_cls_spec_libinear <- 
+    logistic_reg(penalty = 0.1) %>% 
+    set_engine("LiblineaR")
+
+# with “stan” engine
+logreg_cls_spec_stan <- 
+    logistic_reg() %>% 
+    set_engine("stan")
+
+# mars() model 
+# with “earth” engine 
+mars_cls_spec <- 
+    mars(prod_degree = 1, prune_method = "backward") %>% 
+    set_mode("classification") %>% 
+    set_engine("earth")
+
+# nearest_neighbor() models
+# with “kknn” engine
+knn_cls_spec <-   
+  nearest_neighbor(neighbors = 11, weight_func = "triangular") %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+# rand_forest() models
+# with “ranger” engine
+rf_cls_spec <- 
+  rand_forest(trees = 200, min_n = 5) %>% 
+    set_mode("classification") %>% 
+    set_engine("ranger")
+
+# svm_poly() models
+# with “kernlab” engine
+svm_cls_spec_poly <- 
+    svm_poly(cost = 1) %>%
+    set_mode("classification") %>% 
+    set_engine("kernlab")
+
+# svm_rbf() models
+# with “kernlab” engine
+svm_cls_spec_rbf <- 
+  svm_rbf(cost = 1) %>% 
+  set_mode("classification") %>% 
+  set_engine("kernlab")
+```
+
+### Step 4: Model specifications list
+
+```{r}
+set.seed(234)
+tweets_folds <- vfold_cv(tweets_train, v = 5, strata = auto_anno)
+
+# Define model specifications list
+model_specs <- list(
+  bt_cls_spec = bt_cls_spec,
+  dt_cls_spec = dt_cls_spec,
+ # logreg_cls_spec_glm = logreg_cls_spec_glm,
+  logreg_cls_spec_glmnet = logreg_cls_spec_glmnet,
+  logreg_cls_spec_libinear = logreg_cls_spec_libinear,
+  logreg_cls_spec_stan = logreg_cls_spec_stan,
+  mars_cls_spec = mars_cls_spec,
+  knn_cls_spec = knn_cls_spec,
+  rf_cls_spec = rf_cls_spec,
+  svm_cls_spec_poly = svm_cls_spec_poly,
+  svm_cls_spec_rbf = svm_cls_spec_rbf)
+
+# Initialize an empty list to store results
+model_results <- list()
+
+model_results <- list()
+
+for (model_name in names(model_specs)) {
+  # Create the workflow
+  tweet_workflow <- workflow() %>%
+    add_recipe(tweet_recipe) %>%
+    add_model(model_specs[[model_name]])
+  
+  # Fit the model
+  fit_model <- fit(tweet_workflow, tweets_train)
+  
+  # Predict on the test set
+  predictions <- predict(fit_model, tweets_test, type = "prob")
+  
+  # Bind the predictions to the original test set
+  results <- bind_cols(tweets_test, predictions)
+  
+  results <- results %>%
+    rename(pred_rising = ".pred_Story of Rising")
+  results <- results %>%
+    rename(pred_decline = ".pred_Story of Decline")
+  results <- results %>%
+    mutate(predicted_class = ifelse(pred_rising > 0.5, 'Story of Rising', 'Story of Decline'), 
+           predicted_class = factor(predicted_class, levels = levels(auto_anno)),
+           auto_anno = factor(auto_anno))
+# Calculate Metrics
+  accuracy_res <- yardstick::accuracy(results, truth = auto_anno, estimate = predicted_class)$.estimate
+  recall_res <- yardstick::recall(results, truth = auto_anno, estimate = predicted_class, event_level = "first")$.estimate
+  precision_res <- yardstick::precision(results, truth = auto_anno, estimate = predicted_class, event_level = "first")$.estimate
+  
+  # Store each model's metrics in the list
+  model_results[[model_name]] <- tibble(
+    Model = model_name,
+    Accuracy = round(accuracy_res, 2),
+    Recall = round(recall_res, 2),
+    Precision = round(precision_res, 2)
+  )
+}
+```
+
+### Step 5: Combine Model Results
+
+```{r}
+# Combine all model results into a single data frame
+final_results <- bind_rows(model_results) %>%
+  mutate(across(c(Accuracy, Recall, Precision), round, 2))
+
+final_results <- final_results %>%
+  mutate(Model = as.character(Model), # Convert to character if it's a factor
+         Model = dplyr::recode_factor(Model, 
+                        "bt_cls_spec" = "Boosted Trees (`C5.0`)",
+                        "dt_cls_spec" = "Decision Tree (`rpart`)",
+                        "logreg_cls_spec_glmnet" = "Logistic Regression (`glmnet`)",
+                        "logreg_cls_spec_libinear" = "Logistic Regression (`LiblineaR`)",
+                        "logreg_cls_spec_stan" = "Logistic Regression (`stan`)",
+                        "mars_cls_spec" = "Multivariate Adaptive Regression Splines (`earth`)",
+                        "knn_cls_spec" = "Nearest Neighbor (`kknn`)",
+                        "rf_cls_spec" = "Random Forest (`ranger`)",
+                        "svm_cls_spec_poly" = "SVM with Polynomial Kernel (`kernlab`)",
+                        "svm_cls_spec_rbf" = "SVM with Radial Basis Function (`kernlab`)"
+                       ))
+
+final_results_table <- final_results %>%
+  gt() %>%
+  tab_header(title = "Classifier Models' Performance Metrics") %>%
+  cols_label(
+    Model = "Model",
+    Accuracy = "Accuracy",
+    Recall = "Recall",
+    Precision = "Precision"
+  )%>%
+    cols_align(
+    align = "left",
+    columns = vars(Model)  
+  ) %>%
+  tab_options(
+    heading.title.font.size = 16,
+    heading.subtitle.font.size = 12,
+    table.font.size = 12
+  )
+
+# Save the gt table as a PNG image
+gtsave(final_results_table, filename = "output/models_performance_metrics.png")
+
+final_results_table
+```

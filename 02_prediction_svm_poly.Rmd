@@ -1,0 +1,219 @@
+---
+title: "Supervised Text Classification through Support Vector Machines model with “kernlab” engine"
+author: "Nikolina Klatt"
+date: "`r format(Sys.time(), '%B %d, %Y | %H:%M:%S | %Z')`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    number_sections: no
+    theme: cosmo
+    toc: true
+    toc_float: true
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{=html}
+<style>
+  div.answer {background-color:#f3f0ff; border-radius: 5px; padding: 20px;}
+      </style>
+```
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      eval = TRUE,
+                      error = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+#### Load Libraries
+
+```{r}
+library(tidyverse)      
+library(readxl)        
+library(tidymodels)     
+library(textrecipes)   
+library(glmnet)        
+library(yardstick)     
+library(janitor)        
+library(gt)
+library(writexl)
+```
+
+#### Load Data
+
+```{r}
+# Load data set with manually annotated tweets
+tweets <- tweets <- read_excel("data/tweets.xlsx")
+
+# Check the dataset
+tabyl(tweets$auto_anno)
+```
+
+### Classification Modelling
+
+#### Step 1: Preparing the Data
+
+```{r}
+# Filter out NA values from auto_anno to get to the manually annotated data
+tweets_filtered <- tweets %>% 
+  filter(!is.na(auto_anno))
+
+# Create a binary factor for the outcome variable
+tweets_filtered <- tweets_filtered %>%
+  mutate(auto_anno = factor(auto_anno, 
+                            levels = c("Story of Decline", 
+                                       "Story of Rising")))
+
+# Split the data into training and testing sets
+set.seed(123)
+tweets_split <- initial_split(tweets_filtered, prop = 0.7, strata = auto_anno)
+tweets_train <- training(tweets_split)
+tweets_test <- testing(tweets_split)
+```
+
+#### Step 2: Recipe Preparation
+
+```{r}
+tweet_recipe <- recipe(auto_anno ~ text, 
+                       data = tweets_train) %>%
+  step_tokenize(text) %>%
+  step_stopwords(text,  language = "en") %>%
+  step_tokenfilter(text, max_tokens = 1000) %>%
+  step_tfidf(text)
+```
+
+#### Step 3: Model Specification
+
+```{r}
+svm_cls_spec_poly <- 
+    svm_poly(cost = 1) %>%
+    set_mode("classification") %>% 
+    set_engine("kernlab")
+```
+
+#### Step 4: Workflow Creation
+
+```{r}
+set.seed(234)
+tweets_folds <- vfold_cv(tweets_train, 
+                         v = 5, 
+                         strata = auto_anno)
+
+tweet_workflow_poly <- workflow() %>%
+  add_recipe(tweet_recipe) %>%
+  add_model(svm_cls_spec_poly,
+            formula = NULL)
+```
+
+#### Step 5: Fit final model
+
+```{r}
+# Fit the final model
+fit_svm_poly <- fit(tweet_workflow_poly, tweets_train)
+```
+
+#### Step 6: Predict on the Test Set
+
+```{r}
+predictions_svm_poly <- predict(fit_svm_poly, tweets_test, type = "prob")
+
+# Bind the predictions to the original test set
+results <- bind_cols(tweets_test, predictions_svm_poly)
+
+results <- results %>%
+  rename(pred_rising = ".pred_Story of Rising")
+results <- results %>%
+  rename(pred_decline = ".pred_Story of Decline")
+```
+
+### Evaluation
+
+#### Step 1: Create a Binary Prediction Column
+
+```{r}
+results <- results %>%
+  mutate(predicted_class = ifelse(pred_rising > 0.5, 'Story of Rising', 'Story of Decline'))
+```
+
+#### Step 2: Calculate Metrics
+
+```{r}
+# Ensure auto_anno and predicted_class are factors with the same levels
+results <- results %>%
+  mutate(auto_anno = factor(auto_anno),
+         predicted_class = factor(predicted_class, 
+                                  levels = levels(auto_anno)))
+
+# Accuracy
+accuracy_res <- yardstick::accuracy(results, 
+                         truth = auto_anno, 
+                         estimate = predicted_class)
+
+# Recall (Sensitivity)
+recall_res <- yardstick::recall(results, 
+                     truth = auto_anno, 
+                     estimate = predicted_class, 
+                     event_level = "first")
+
+# Precision 
+precision_res <- yardstick::precision(results, 
+                           truth = auto_anno, 
+                           estimate = predicted_class, 
+                           event_level = "first")
+
+# Combine the metrics into one data frame
+metrics_res <- bind_rows(
+  accuracy = accuracy_res %>% mutate(Metric = "Accuracy"),
+  recall = recall_res %>% mutate(Metric = "Recall"),
+  precision = precision_res %>% mutate(Metric = "Precision")
+) %>%
+  select(Metric, .estimate) %>%
+  rename(Estimate = .estimate)
+
+metrics_res_rounded <- metrics_res %>%
+  mutate(Estimate = round(Estimate, 2))
+
+# Create a table 
+models <- metrics_res_rounded %>%
+  pivot_wider(names_from = Metric, values_from = Estimate) %>%
+  mutate(Model = "svm_poly() model with “kernlab” engine") %>%
+  select(Model, Accuracy, Recall, Precision)
+
+models %>%
+  gt() %>%
+  tab_header(
+    title = "SVM with Polynomial Kernel Performance Metrics")
+
+```
+
+```{r}
+results %>%
+  roc_curve(truth = auto_anno, pred_rising) %>%
+  autoplot() +
+  labs(title = "ROC Curve for Tweet Classification Model",
+       x = "1 - Specificity",
+       y = "Sensitivity")
+
+```
+
+### Prediction
+
+```{r}
+# Make Predictions on the new dataset
+tweets_predicted_prob <- predict(fit_svm_poly, new_data = tweets, type = "prob")
+tweets_predicted <- predict(fit_svm_poly, new_data = tweets)
+
+# Bind the predictions to the original test data to review
+tweets_final <- bind_cols(tweets, tweets_predicted)
+
+tweets_final <- tweets_final %>%
+  rename(pred_story_type = ".pred_class")
+
+# write_xlsx(tweets_final, "data/tweets_final.xlsx")
+
+```
